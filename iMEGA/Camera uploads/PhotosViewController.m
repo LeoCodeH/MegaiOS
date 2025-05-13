@@ -172,6 +172,7 @@
         }
         
         if (![self.tabBarController.view.subviews containsObject:self.toolbar]) {
+            [self didSelectedPhotoCountChange:0];
             [self.toolbar setAlpha:0.0];
             
             [self updateBarButtonItemsIn:self.toolbar];
