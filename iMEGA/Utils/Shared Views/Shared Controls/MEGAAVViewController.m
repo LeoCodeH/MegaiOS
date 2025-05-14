@@ -19,6 +19,9 @@ static const NSUInteger MIN_SECOND = 10; // Save only where the users were playi
 @property (nonatomic, assign, getter=isViewDidAppearFirstTime) BOOL viewDidAppearFirstTime;
 @property (nonatomic, strong) NSMutableSet *subscriptions;
 
+@property (nonatomic, strong, nullable) AVAsset *preloadAsset; // nil if 'self.enablePreload' is NO
+@property (nonatomic, strong, nullable) AVPlayerItem *preloadPlayerItem; // nil if 'self.enablePreload' is NO
+
 @end
 
 @implementation MEGAAVViewController
@@ -27,6 +30,8 @@ static const NSUInteger MIN_SECOND = 10; // Save only where the users were playi
     self = [super init];
     
     if (self) {
+        _enablePreload = YES; // Hard coded for easy testing. If there is a configuration center, it can be read from the configuration center.
+        _vcType = MEGAAVViewControllerFile;
         self.viewModel = [self makeViewModel];
         MEGALogInfo(@"[MEGAAVViewController] init with url: %@", fileUrl);
         self.fileUrl    = fileUrl;
@@ -43,6 +48,8 @@ static const NSUInteger MIN_SECOND = 10; // Save only where the users were playi
     self = [super init];
     
     if (self) {
+        _enablePreload = YES; // Hard coded for easy testing. If there is a configuration center, it can be read from the configuration center.
+        _vcType = MEGAAVViewControllerNode;
         self.viewModel = [self makeViewModel];
         _apiForStreaming = apiForStreaming;
         self.node            = folderLink ? [MEGASdk.sharedFolderLink authorizeNode:node] : node;
@@ -55,25 +62,89 @@ static const NSUInteger MIN_SECOND = 10; // Save only where the users were playi
     return self;
 }
 
+- (BOOL)reuseWithURL:(NSURL * _Nonnull)fileUrl {
+    if (self.vcType != MEGAAVViewControllerFile) {
+        return NO;
+    }
+    
+    // update internal data
+    MEGALogInfo(@"[MEGAAVViewController] update with url: %@", fileUrl);
+    if (self.player) {
+        [self.player replaceCurrentItemWithPlayerItem:nil];
+    }
+    self.preloadPlayerItem = nil;
+    self.preloadAsset = nil;
+    
+    self.fileUrl    = fileUrl;
+    self.node       = nil;
+    _isFolderLink   = NO;
+    _hasPlayedOnceBefore = NO;
+    [self prepareBeforeViewAppear]; // viewDidLoad is called only once. Here, the common logic in viewDidLoad is encapsulated into another method to reuse.
+    return YES;
+}
+
+- (BOOL)reuseWithNode:(MEGANode * _Nonnull)node folderLink:(BOOL)folderLink apiForStreaming:(MEGASdk * _Nonnull)apiForStreaming {
+    if (self.vcType != MEGAAVViewControllerNode) {
+        return NO;
+    }
+    
+    // update internal data
+    if (self.player) {
+        [self.player replaceCurrentItemWithPlayerItem:nil];
+    }
+    self.preloadPlayerItem = nil;
+    self.preloadAsset = nil;
+    
+    _apiForStreaming = apiForStreaming;
+    self.node            = folderLink ? [MEGASdk.sharedFolderLink authorizeNode:node] : node;
+    _isFolderLink        = folderLink;
+    self.fileUrl         = [self streamingPathWithNode:node];
+    MEGALogInfo(@"[MEGAAVViewController] update with node %@, is folderLink: %d, fileUrl: %@, apiForStreaming: %@", self.node, folderLink, self.fileUrl, apiForStreaming);
+    _hasPlayedOnceBefore = NO;
+    [self prepareBeforeViewAppear]; // viewDidLoad is called only once. Here, the common logic in viewDidLoad is encapsulated into another method to reuse.
+    return YES;
+}
+
+- (void)asyncPreload {
+    if (!self.enablePreload ||
+        self.preloadAsset ||
+        self.preloadPlayerItem) {
+        return;
+    }
+    
+    BOOL needToCreatePlayer = (self.player == nil); // If the ViewController already holds the player, there is no need to create another one.
+    NSURL *fileUrl = [self.fileUrl copy];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // Load resources in the asynchronous queue
+        AVAsset *asset = [AVAsset assetWithURL:fileUrl];
+        AVPlayerItem *playerItem = [AVPlayerItem playerItemWithAsset:asset];
+        AVPlayer *player = nil;
+        if (needToCreatePlayer) {
+            player = [AVPlayer playerWithPlayerItem:playerItem];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // After the resource loading is completed, return to the main thread for saving.
+            if (self.preloadAsset || self.preloadPlayerItem) {
+                return;
+            }
+            
+            self.preloadAsset = asset;
+            self.preloadPlayerItem = playerItem;
+            if (needToCreatePlayer && player) {
+                self.player = player;
+            }
+            else {
+                // For cases where the ViewController already holds a player, directly replace the player's item to further reduce overhead (there is a lot of logic inside setPlayer).
+                [self.player replaceCurrentItemWithPlayerItem:playerItem];
+            }
+            [self.subscriptions addObject:[self bindPlayerItemStatusWithPlayerItem:playerItem]];
+        });
+    });
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
-    [self.viewModel onViewDidLoad];
-    [self checkIsFileViolatesTermsOfService];
-    [AudioSessionUseCaseOCWrapper.alloc.init configureVideoAudioSession];
-    
-    if ([AudioPlayerManager.shared isPlayerAlive]) {
-        [AudioPlayerManager.shared audioInterruptionDidStart];
-    }
-
-    self.viewDidAppearFirstTime = YES;
-    
-    self.subscriptions = [self bindToSubscriptionsWithMovieStalled:^{
-        [self movieStalledCallback];
-    }];
-    
-    [self configureActivityIndicator];
-    
-    [self configureViewColor];
+    [self prepareBeforeViewAppear]; // viewDidLoad is called only once. Here, the common logic in viewDidLoad is encapsulated into another method to reuse.
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -183,15 +254,47 @@ static const NSUInteger MIN_SECOND = 10; // Save only where the users were playi
     if (!self.fileUrl) {
         return;
     }
-    
-    [self willStartPlayer];
 
-    AVAsset *asset = [AVAsset assetWithURL:self.fileUrl];
-    AVPlayerItem *playerItem = [AVPlayerItem playerItemWithAsset:asset];
-    [self setPlayerItemMetadataWithPlayerItem:playerItem node:self.node];
-    self.player = [AVPlayer playerWithPlayerItem:playerItem];
-    [self.subscriptions addObject:[self bindPlayerItemStatusWithPlayerItem:playerItem]];
+    [self willStartPlayer];
     
+    // Adapt the logic for enabling and disabling the preloading capability.
+    AVAsset *asset = nil;
+    if (self.enablePreload) {
+        if (self.preloadAsset) {
+            asset = self.preloadAsset;
+        }
+        else {
+            asset = [AVAsset assetWithURL:self.fileUrl];
+            self.preloadAsset = asset;
+        }
+    }
+    else {
+        asset = [AVAsset assetWithURL:self.fileUrl];
+    }
+
+    // Adapt the logic for enabling and disabling the preloading capability.
+    AVPlayerItem *playerItem = nil;
+    if (self.enablePreload) {
+        if (self.preloadPlayerItem) {
+            playerItem = self.preloadPlayerItem;
+        }
+        else {
+            playerItem = [AVPlayerItem playerItemWithAsset:asset];
+            self.preloadPlayerItem = playerItem;
+        }
+    }
+    else {
+        playerItem = [AVPlayerItem playerItemWithAsset:asset];
+    }
+
+    [self setPlayerItemMetadataWithPlayerItem:playerItem node:self.node];
+    
+    if (!self.player) {
+        AVPlayer *player = [AVPlayer playerWithPlayerItem:playerItem];;
+        self.player = player;
+        [self.subscriptions addObject:[self bindPlayerItemStatusWithPlayerItem:playerItem]];
+    }
+
     [self seekToMediaDestination:mediaDestination];
     
     if (play) {
@@ -241,6 +344,28 @@ static const NSUInteger MIN_SECOND = 10; // Save only where the users were playi
     }
     
     return fingerprint;
+}
+
+#pragma mark - Private method
+- (void)prepareBeforeViewAppear __attribute__((objc_direct)) {
+    // viewDidLoad is called only once. Here, the common logic in viewDidLoad is encapsulated into another method to reuse.
+    [self.viewModel onViewDidLoad];
+    [self checkIsFileViolatesTermsOfService];
+    [AudioSessionUseCaseOCWrapper.alloc.init configureVideoAudioSession];
+    
+    if ([AudioPlayerManager.shared isPlayerAlive]) {
+        [AudioPlayerManager.shared audioInterruptionDidStart];
+    }
+
+    self.viewDidAppearFirstTime = YES;
+    
+    self.subscriptions = [self bindToSubscriptionsWithMovieStalled:^{
+        [self movieStalledCallback];
+    }];
+    
+    [self configureActivityIndicator];
+    
+    [self configureViewColor];
 }
 
 @end
