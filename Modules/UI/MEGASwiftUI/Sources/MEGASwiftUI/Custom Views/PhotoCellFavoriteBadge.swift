@@ -14,7 +14,7 @@ struct PhotoCellFavoriteBadge: ViewModifier {
         ZStack(alignment: .topTrailing) {
             Rectangle()
                 .fill(LinearGradient(gradient: Gradient(colors: [Color.black.opacity(0.3), Color.white.opacity(0.01)]), startPoint: .top, endPoint: .bottom))
-                .alignmentGuide(.top) { d in d[.top] }
+                .fixed_alignmentGuide(.top) { d in d[.top] }
             
             Image(systemName: "heart.fill")
                 .resizable()

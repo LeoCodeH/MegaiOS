@@ -9,8 +9,8 @@ struct PhotoLibraryZoomControl: View {
     
     var body: some View {
         zoomControl()
-            .alignmentGuide(.trailing, computeValue: { d in d[.trailing] + 12})
-            .alignmentGuide(.top, computeValue: { d in d[.top] - 5})
+            .fixed_alignmentGuide(.trailing, computeValue: { d in d[.trailing] + 12})
+            .fixed_alignmentGuide(.top, computeValue: { d in d[.top] - 5})
             .opacity(editMode?.wrappedValue.isEditing == true ? 0 : 1)
     }
     

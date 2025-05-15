@@ -1,5 +1,6 @@
 import MEGADesignToken
 import MEGASwift
+import MEGASwiftUI
 import SwiftUI
 
 struct NodeTagsView: View {
@@ -74,7 +75,7 @@ struct NodeTagsView: View {
             .onTapGesture {
                 tagViewModel.toggle()
             }
-            .alignmentGuide(HorizontalAlignment.center) { dimension in
+            .fixed_alignmentGuide(HorizontalAlignment.center) { dimension in
                 calculateHorizontalAlignment(
                     dimension: dimension,
                     layoutState: layoutState,
@@ -82,7 +83,7 @@ struct NodeTagsView: View {
                     isLastElement: isLastElement
                 )
             }
-            .alignmentGuide(VerticalAlignment.center) { _ in
+            .fixed_alignmentGuide(VerticalAlignment.center) { _ in
                 calculateVerticalAlignment(layoutState: layoutState, isLastElement: isLastElement)
             }
     }
